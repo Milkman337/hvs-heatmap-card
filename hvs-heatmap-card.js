@@ -51,6 +51,8 @@ class HVSHeatmapCard extends HTMLElement {
   }
 
   // Render a smooth bilinear-interpolated heatmap onto a canvas.
+  // Rotated 90°: horizontal axis = rows (0–3), vertical axis = cols (0–2).
+  // Top edge = col 0 (left terminal), bottom edge = col 2 (right terminal).
   // colData[col][row] = temperature value (column-major, 3 cols × 4 rows).
   _drawCanvas(canvas, colData, lo, hi) {
     const COLS = 3, ROWS = 4;
@@ -61,17 +63,17 @@ class HVSHeatmapCard extends HTMLElement {
 
     for (let py = 0; py < H; py++) {
       for (let px = 0; px < W; px++) {
-        // Map pixel position to fractional sensor-grid coordinates.
-        // Sensors sit at the center of each cell, so we clamp to [0, COLS-1] / [0, ROWS-1].
-        const fx = (px / (W - 1)) * (COLS - 1);
-        const fy = (py / (H - 1)) * (ROWS - 1);
+        // Horizontal axis → row index (0 to ROWS-1)
+        // Vertical axis   → col index (0 to COLS-1)
+        const fr = (px / (W - 1)) * (ROWS - 1);
+        const fc = (py / (H - 1)) * (COLS - 1);
 
-        const c0 = Math.floor(fx), c1 = Math.min(c0 + 1, COLS - 1);
-        const r0 = Math.floor(fy), r1 = Math.min(r0 + 1, ROWS - 1);
-        const tx = fx - c0, ty = fy - r0;
+        const r0 = Math.floor(fr), r1 = Math.min(r0 + 1, ROWS - 1);
+        const c0 = Math.floor(fc), c1 = Math.min(c0 + 1, COLS - 1);
+        const tx = fr - r0, ty = fc - c0;
 
-        const t00 = colData[c0][r0], t10 = colData[c1][r0];
-        const t01 = colData[c0][r1], t11 = colData[c1][r1];
+        const t00 = colData[c0][r0], t10 = colData[c0][r1];
+        const t01 = colData[c1][r0], t11 = colData[c1][r1];
         const vals = [t00, t10, t01, t11].filter(v => v !== null && !isNaN(v));
 
         let rgb;
@@ -152,7 +154,7 @@ class HVSHeatmapCard extends HTMLElement {
           <div class="el-label" title="Element ${eNum}${isTop ? ' — top' : isBottom ? ' — bottom' : ''}">
             ${isTop ? '↑ ' : ''}E${eNum}${isBottom ? ' ↓' : ''}
           </div>
-          <canvas class="el-canvas" data-element="${e}" width="120" height="160"
+          <canvas class="el-canvas" data-element="${e}" width="240" height="90"
             title="E${eNum} · avg ${eAvg}°C · ${eMin}–${eMax}°C&#10;${tipLines.join('  ')}"></canvas>
           <div class="el-stat">${eAvg}°C<br><span class="range">${eMin}–${eMax}</span></div>
         </div>`;
