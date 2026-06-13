@@ -8,7 +8,7 @@
 //   [s3 ][s7 ][s11]
 //   [s4 ][s8 ][s12]
 //
-// 4 elements stacked: element 4 (top of stack) at top, element 1 (bottom) at bottom.
+// 4 elements stacked: element 1 (top of stack, hottest) at top, element 4 (floor, coolest) at bottom.
 // All 48 sensors share tower_1: cell_01 … cell_48.
 
 class HVSHeatmapCard extends HTMLElement {
@@ -76,12 +76,12 @@ class HVSHeatmapCard extends HTMLElement {
     const avg = flat.length ? flat.reduce((a, b) => a + b, 0) / flat.length : null;
     const missing = ELEMENTS * CPE - flat.length;
 
-    // Build element blocks — element 4 at top, element 1 at bottom
+    // Build element blocks — element 1 at top (hottest, heat rises), element 4 at bottom
     let elementsHtml = '';
-    for (let e = ELEMENTS - 1; e >= 0; e--) {
+    for (let e = 0; e < ELEMENTS; e++) {
       const eNum = e + 1;
-      const isTop = e === ELEMENTS - 1;
-      const isBottom = e === 0;
+      const isTop = e === 0;
+      const isBottom = e === ELEMENTS - 1;
 
       // Build the 4-row × 3-col grid
       let rowsHtml = '';
@@ -104,14 +104,14 @@ class HVSHeatmapCard extends HTMLElement {
 
       elementsHtml += `
         <div class="element${isBottom ? ' element-bottom' : ''}">
-          <div class="el-label" title="Element ${eNum}${isBottom ? ' — bottom of stack' : isTop ? ' — top of stack' : ''}">
+          <div class="el-label" title="Element ${eNum}${isTop ? ' — top of stack' : isBottom ? ' — bottom of stack' : ''}">
             ${isTop ? '↑ ' : ''}E${eNum}${isBottom ? ' ↓' : ''}
           </div>
           <div class="el-grid">${rowsHtml}</div>
           <div class="el-stat">${eMin}–${eMax}°</div>
         </div>`;
 
-      if (e > 0) {
+      if (e < ELEMENTS - 1) {
         elementsHtml += `<div class="sep"></div>`;
       }
     }
@@ -221,7 +221,7 @@ class HVSHeatmapCard extends HTMLElement {
             <span class="lval">${lo.toFixed(0)}°</span>
           </div>
         </div>
-        <div class="footer">← left terminal &nbsp;·&nbsp; center &nbsp;·&nbsp; right terminal →</div>
+        <div class="footer">↑ top of stack (E1) &nbsp;·&nbsp; bottom of stack (E4) ↓ &nbsp;·&nbsp; ← left terminal · center · right terminal →</div>
       </ha-card>
     `;
   }
