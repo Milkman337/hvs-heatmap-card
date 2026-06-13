@@ -10,8 +10,8 @@ Visualizes all 48 temperature sensors as a color-coded grid (4 elements × 12 ce
 
 ### HACS (recommended)
 
-1. In HACS → Frontend, click the three-dot menu → **Custom repositories**
-2. Add `https://git.kjan.de/jank/hvs-heatmap-card` with category **Lovelace**
+1. In HACS, click the three-dot menu → **Custom repositories**
+2. Add `https://git.kjan.de/jank/hvs-heatmap-card` with category **Dashboard**
 3. Install **HVS Heatmap Card** from HACS
 4. Add the resource (HACS usually does this automatically)
 
