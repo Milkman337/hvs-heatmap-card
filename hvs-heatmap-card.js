@@ -1,14 +1,14 @@
 // BYD HVS Temperature Heatmap Card
 //
 // Physical layout per element: 3 columns × 4 rows, column-major numbering.
-// Columns 1 & 3 are the electrical terminal edges (hotter), column 2 is center (cooler).
+// Columns 1 & 3 = electrical terminal edges (hotter), column 2 = center (cooler).
 //
 //   [s1 ][s5 ][s9 ]
 //   [s2 ][s6 ][s10]
 //   [s3 ][s7 ][s11]
 //   [s4 ][s8 ][s12]
 //
-// 4 elements stacked: element 1 (top of stack, hottest) at top, element 4 (floor, coolest) at bottom.
+// E1 = top of physical stack (hottest — heat accumulates), E4 = floor (coolest).
 // All 48 sensors share tower_1: cell_01 … cell_48.
 
 class HVSHeatmapCard extends HTMLElement {
@@ -33,28 +33,77 @@ class HVSHeatmapCard extends HTMLElement {
     return `sensor.byd_battery_${this._config.device_id}_byd_cell_temperature_tower_1_cell_${String(globalCell).padStart(2, '0')}`;
   }
 
-  // Smooth HSL gradient: blue (240°) → cyan → green → yellow → red (0°)
-  _tempToColor(t, lo, hi) {
-    if (t === null) return { bg: 'rgba(60,60,60,0.3)', fg: '#555', glow: 'none' };
+  // HSL → RGB (h: 0–360, s/l: 0–100)
+  _hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => {
+      const k = (n + h / 30) % 12;
+      return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    };
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  // Temperature → RGB via smooth HSL gradient blue→cyan→green→yellow→red
+  _tempToRgb(t, lo, hi) {
     const n = Math.max(0, Math.min(1, (t - lo) / Math.max(hi - lo, 0.01)));
-    const hue = 240 - n * 240;
-    const sat = 72 + n * 18;
-    const light = 46 - n * 10;
-    const bg = `hsl(${hue.toFixed(1)},${sat.toFixed(0)}%,${light.toFixed(0)}%)`;
-    const fg = light > 40 ? '#fff' : '#ffe';
-    return { bg, fg };
+    return this._hslToRgb(240 - n * 240, 72 + n * 18, 46 - n * 10);
+  }
+
+  // Render a smooth bilinear-interpolated heatmap onto a canvas.
+  // colData[col][row] = temperature value (column-major, 3 cols × 4 rows).
+  _drawCanvas(canvas, colData, lo, hi) {
+    const COLS = 3, ROWS = 4;
+    const W = canvas.width, H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(W, H);
+    const d = img.data;
+
+    for (let py = 0; py < H; py++) {
+      for (let px = 0; px < W; px++) {
+        // Map pixel position to fractional sensor-grid coordinates.
+        // Sensors sit at the center of each cell, so we clamp to [0, COLS-1] / [0, ROWS-1].
+        const fx = (px / (W - 1)) * (COLS - 1);
+        const fy = (py / (H - 1)) * (ROWS - 1);
+
+        const c0 = Math.floor(fx), c1 = Math.min(c0 + 1, COLS - 1);
+        const r0 = Math.floor(fy), r1 = Math.min(r0 + 1, ROWS - 1);
+        const tx = fx - c0, ty = fy - r0;
+
+        const t00 = colData[c0][r0], t10 = colData[c1][r0];
+        const t01 = colData[c0][r1], t11 = colData[c1][r1];
+        const vals = [t00, t10, t01, t11].filter(v => v !== null && !isNaN(v));
+
+        let rgb;
+        if (!vals.length) {
+          rgb = [45, 45, 45];
+        } else if (vals.length < 4) {
+          // Graceful fallback for missing sensors
+          rgb = this._tempToRgb(vals.reduce((a, b) => a + b) / vals.length, lo, hi);
+        } else {
+          // Bilinear interpolation
+          const t = t00 * (1 - tx) * (1 - ty)
+                  + t10 * tx       * (1 - ty)
+                  + t01 * (1 - tx) * ty
+                  + t11 * tx       * ty;
+          rgb = this._tempToRgb(t, lo, hi);
+        }
+
+        const i = (py * W + px) * 4;
+        d[i] = rgb[0]; d[i + 1] = rgb[1]; d[i + 2] = rgb[2]; d[i + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(img, 0, 0);
   }
 
   _render() {
     if (!this._hass || !this._config) return;
 
-    const ELEMENTS = 4;
-    const COLS = 3;
-    const ROWS = 4;
-    const CPE = COLS * ROWS; // 12
+    const ELEMENTS = 4, COLS = 3, ROWS = 4, CPE = 12;
     const title = this._config.title || 'BYD HVS Temperature Heatmap';
 
-    // Read all 48 temps; grid[e][col][row] using column-major layout
+    // Read all temps. grid[e][col][row], column-major within each element.
     const grid = [];
     for (let e = 0; e < ELEMENTS; e++) {
       const cols = [];
@@ -73,57 +122,49 @@ class HVSHeatmapCard extends HTMLElement {
     const flat = grid.flat(2).filter(v => v !== null && !isNaN(v));
     const lo = flat.length ? Math.min(...flat) : 20;
     const hi = flat.length ? Math.max(...flat) : 40;
-    const avg = flat.length ? flat.reduce((a, b) => a + b, 0) / flat.length : null;
+    const avg = flat.length ? flat.reduce((a, b) => a + b) / flat.length : null;
     const missing = ELEMENTS * CPE - flat.length;
 
-    // Build element blocks — element 1 at top (hottest, heat rises), element 4 at bottom
+    // Build element rows — E1 at top, E4 at bottom
     let elementsHtml = '';
     for (let e = 0; e < ELEMENTS; e++) {
       const eNum = e + 1;
       const isTop = e === 0;
       const isBottom = e === ELEMENTS - 1;
 
-      // Build the 4-row × 3-col grid
-      let rowsHtml = '';
-      for (let r = 0; r < ROWS; r++) {
-        let cellsHtml = '';
-        for (let c = 0; c < COLS; c++) {
-          const globalCell = e * CPE + c * ROWS + r + 1;
-          const temp = grid[e][c][r];
-          const { bg, fg } = this._tempToColor(temp, lo, hi);
-          cellsHtml += `<div class="cell" style="background:${bg};color:${fg}"
-            title="cell ${String(globalCell).padStart(2,'0')} · ${temp !== null ? temp.toFixed(1)+' °C' : 'n/a'}"
-          ><span class="ct">${temp !== null ? temp.toFixed(1) : '—'}</span></div>`;
-        }
-        rowsHtml += `<div class="grow-row">${cellsHtml}</div>`;
-      }
-
       const ets = grid[e].flat().filter(v => v !== null && !isNaN(v));
       const eMin = ets.length ? Math.min(...ets).toFixed(1) : '—';
       const eMax = ets.length ? Math.max(...ets).toFixed(1) : '—';
+      const eAvg = ets.length ? (ets.reduce((a, b) => a + b) / ets.length).toFixed(1) : '—';
+
+      // Tooltip lists all 12 sensor readings
+      const tipLines = [];
+      for (let c = 0; c < COLS; c++) {
+        for (let r = 0; r < ROWS; r++) {
+          const gc = e * CPE + c * ROWS + r + 1;
+          const t = grid[e][c][r];
+          tipLines.push(`C${String(gc).padStart(2, '0')}: ${t !== null ? t.toFixed(1) + '°' : 'n/a'}`);
+        }
+      }
 
       elementsHtml += `
-        <div class="element${isBottom ? ' element-bottom' : ''}">
-          <div class="el-label" title="Element ${eNum}${isTop ? ' — top of stack' : isBottom ? ' — bottom of stack' : ''}">
+        <div class="element">
+          <div class="el-label" title="Element ${eNum}${isTop ? ' — top' : isBottom ? ' — bottom' : ''}">
             ${isTop ? '↑ ' : ''}E${eNum}${isBottom ? ' ↓' : ''}
           </div>
-          <div class="el-grid">${rowsHtml}</div>
-          <div class="el-stat">${eMin}–${eMax}°</div>
+          <canvas class="el-canvas" data-element="${e}" width="120" height="160"
+            title="E${eNum} · avg ${eAvg}°C · ${eMin}–${eMax}°C&#10;${tipLines.join('  ')}"></canvas>
+          <div class="el-stat">${eAvg}°C<br><span class="range">${eMin}–${eMax}</span></div>
         </div>`;
 
-      if (e < ELEMENTS - 1) {
-        elementsHtml += `<div class="sep"></div>`;
-      }
+      if (!isBottom) elementsHtml += `<div class="sep"></div>`;
     }
 
-    // Vertical gradient legend
     const gradStops = [
       'hsl(0,90%,36%) 0%',
-      'hsl(30,88%,40%) 15%',
       'hsl(60,85%,43%) 35%',
       'hsl(120,80%,43%) 55%',
       'hsl(180,76%,44%) 75%',
-      'hsl(220,76%,46%) 88%',
       'hsl(240,74%,48%) 100%',
     ].join(', ');
 
@@ -131,7 +172,6 @@ class HVSHeatmapCard extends HTMLElement {
       <style>
         :host { display: block; }
         ha-card { padding: 14px 12px 12px; box-sizing: border-box; }
-
         .header {
           display: flex; justify-content: space-between; align-items: baseline;
           margin-bottom: 12px; flex-wrap: wrap; gap: 4px;
@@ -142,51 +182,34 @@ class HVSHeatmapCard extends HTMLElement {
         .warn { color: var(--warning-color, orange); }
 
         .body { display: flex; gap: 8px; align-items: stretch; }
+        .elements { display: flex; flex-direction: column; flex: 1; }
+        .element { display: flex; align-items: center; gap: 6px; }
 
-        .elements { display: flex; flex-direction: column; flex: 1; gap: 0; }
-
-        .element {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
         .el-label {
           width: 28px; flex-shrink: 0;
           font-size: 0.62em; font-weight: 700;
-          color: var(--secondary-text-color);
-          text-align: right;
-          cursor: default;
-          line-height: 1;
+          color: var(--secondary-text-color); text-align: right;
+          cursor: default; line-height: 1;
         }
-        .el-grid { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-        .grow-row { display: flex; gap: 2px; }
-        .cell {
-          flex: 1;
-          height: 26px;
-          border-radius: 3px;
-          display: flex; align-items: center; justify-content: center;
+        .el-canvas {
+          flex: 1; display: block;
+          width: 100%; height: auto;
+          border-radius: 6px;
           cursor: default;
-          transition: filter 0.12s, transform 0.1s;
-          min-width: 0;
+          image-rendering: auto;
         }
-        .cell:hover { filter: brightness(1.2); transform: scale(1.06); z-index: 2; position: relative; }
-        .ct { font-size: 0.66em; font-weight: 700; line-height: 1; }
-
         .el-stat {
-          width: 52px; flex-shrink: 0;
-          font-size: 0.58em;
-          color: var(--secondary-text-color);
-          text-align: left;
-          line-height: 1.4;
+          width: 48px; flex-shrink: 0;
+          font-size: 0.58em; color: var(--secondary-text-color);
+          line-height: 1.6; text-align: left;
         }
+        .range { opacity: 0.7; font-size: 0.9em; }
 
         .sep {
-          height: 5px;
-          margin: 2px 0;
-          border-bottom: 1px dashed var(--divider-color, rgba(128,128,128,0.2));
+          height: 6px; margin: 1px 0;
+          border-bottom: 1px dashed var(--divider-color, rgba(128,128,128,0.18));
         }
 
-        /* Vertical legend */
         .legend {
           display: flex; flex-direction: column; align-items: center;
           gap: 4px; width: 20px; flex-shrink: 0;
@@ -196,11 +219,9 @@ class HVSHeatmapCard extends HTMLElement {
           flex: 1; width: 9px; border-radius: 4px;
           background: linear-gradient(to bottom, ${gradStops});
         }
-
         .footer {
-          margin-top: 8px;
-          font-size: 0.62em; color: var(--secondary-text-color);
-          text-align: center; letter-spacing: 0.02em;
+          margin-top: 8px; font-size: 0.61em;
+          color: var(--secondary-text-color); text-align: center;
         }
       </style>
       <ha-card>
@@ -221,9 +242,14 @@ class HVSHeatmapCard extends HTMLElement {
             <span class="lval">${lo.toFixed(0)}°</span>
           </div>
         </div>
-        <div class="footer">↑ top of stack (E1) &nbsp;·&nbsp; bottom of stack (E4) ↓ &nbsp;·&nbsp; ← left terminal · center · right terminal →</div>
+        <div class="footer">↑ E1 top of stack &nbsp;·&nbsp; E4 bottom ↓ &nbsp;·&nbsp; ← left terminal · center · right terminal →</div>
       </ha-card>
     `;
+
+    // Draw the gradient canvases now that the DOM is ready
+    this.shadowRoot.querySelectorAll('.el-canvas').forEach(canvas => {
+      this._drawCanvas(canvas, grid[parseInt(canvas.dataset.element)], lo, hi);
+    });
   }
 }
 
@@ -233,6 +259,6 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'hvs-heatmap-card',
   name: 'HVS Battery Heatmap',
-  description: 'BYD HVS temperature heatmap — 4 elements × 3 cols × 4 rows',
+  description: 'BYD HVS temperature heatmap — bilinear gradient, 4 elements × 3×4 sensors',
   preview: false,
 });
