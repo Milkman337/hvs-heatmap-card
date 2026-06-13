@@ -17,179 +17,231 @@ class HVSHeatmapCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 5;
+    return 8;
   }
 
-  // All 48 sensors share tower_1; cells 01–48 split into 4 elements of 12
-  // Element 1 (bottom) = cells 01–12, Element 4 (top) = cells 37–48
   _sensorId(globalCell) {
     return `sensor.byd_battery_${this._config.device_id}_byd_cell_temperature_tower_1_cell_${String(globalCell).padStart(2, '0')}`;
   }
 
+  // Smooth HSL gradient: blue (240°) → cyan → green → yellow → red (0°)
   _tempToColor(t, lo, hi) {
-    if (t === null) return ['#2d2d2d', '#666'];
+    if (t === null) return { bg: 'rgba(80,80,80,0.25)', fg: '#555', border: 'rgba(255,255,255,0.05)' };
     const n = Math.max(0, Math.min(1, (t - lo) / Math.max(hi - lo, 0.01)));
-    let r, g, b;
-    if (n < 0.25) {
-      r = 0; g = Math.round(n / 0.25 * 160); b = 220;
-    } else if (n < 0.5) {
-      r = 0; g = Math.round(160 + (n - 0.25) / 0.25 * 95); b = Math.round(220 * (1 - (n - 0.25) / 0.25));
-    } else if (n < 0.75) {
-      r = Math.round((n - 0.5) / 0.25 * 255); g = 255; b = 0;
-    } else {
-      r = 255; g = Math.round(255 * (1 - (n - 0.75) / 0.25)); b = 0;
-    }
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    return [`rgb(${r},${g},${b})`, lum > 145 ? '#111' : '#fff'];
+    const hue = 240 - n * 240;
+    const sat = 75 + n * 15;          // 75% → 90%
+    const light = 48 - n * 10;        // 48% → 38%
+    const bg = `hsl(${hue.toFixed(1)},${sat.toFixed(0)}%,${light.toFixed(0)}%)`;
+    const fg = light > 42 ? '#fff' : (light > 36 ? '#ffe' : '#fff');
+    const border = `hsla(${hue.toFixed(1)},${sat.toFixed(0)}%,${(light + 20).toFixed(0)}%,0.35)`;
+    return { bg, fg, border };
   }
 
   _render() {
     if (!this._hass || !this._config) return;
 
     const ELEMENTS = 4;
-    const CELLS_PER_ELEMENT = 12;
-    const TOTAL_CELLS = ELEMENTS * CELLS_PER_ELEMENT; // 48
+    const CPE = 12; // cells per element
     const title = this._config.title || 'BYD HVS Temperature Heatmap';
 
-    // Collect all 48 temps, grouped into 4 elements of 12
-    // Element 1 = cells 01–12 (bottom), Element 4 = cells 37–48 (top)
     const grid = [];
     for (let e = 0; e < ELEMENTS; e++) {
       const row = [];
-      for (let c = 0; c < CELLS_PER_ELEMENT; c++) {
-        const globalCell = e * CELLS_PER_ELEMENT + c + 1;
-        const st = this._hass.states[this._sensorId(globalCell)];
+      for (let c = 0; c < CPE; c++) {
+        const id = this._sensorId(e * CPE + c + 1);
+        const st = this._hass.states[id];
         row.push(st && st.state !== 'unavailable' ? parseFloat(st.state) : null);
       }
       grid.push(row);
     }
 
     const flat = grid.flat().filter(v => v !== null && !isNaN(v));
-    const lo = flat.length ? Math.floor(Math.min(...flat)) : 20;
-    const hi = flat.length ? Math.ceil(Math.max(...flat)) : 40;
+    const lo = flat.length ? Math.min(...flat) : 20;
+    const hi = flat.length ? Math.max(...flat) : 40;
     const avg = flat.length ? flat.reduce((a, b) => a + b, 0) / flat.length : null;
-    const missing = TOTAL_CELLS - flat.length;
+    const missing = ELEMENTS * CPE - flat.length;
 
-    // Build element rows — E4 at top, E1 at bottom (physical orientation)
-    let rows = '';
-    for (let e = ELEMENTS; e >= 1; e--) {
-      const eIdx = e - 1; // 0-based index into grid[]
-      let cells = '';
-      for (let c = 0; c < CELLS_PER_ELEMENT; c++) {
+    // Each element is a column; cells run top-to-bottom within the column.
+    // E1 (bottom of stack) on the left, E4 (top) on the right.
+    // Within each element, cell 1 at top, cell 12 at bottom.
+    let cols = '';
+    for (let e = 1; e <= ELEMENTS; e++) {
+      const eIdx = e - 1;
+      const ets = grid[eIdx].filter(v => v !== null && !isNaN(v));
+      const eMin = ets.length ? Math.min(...ets).toFixed(1) : '—';
+      const eMax = ets.length ? Math.max(...ets).toFixed(1) : '—';
+      const eAvg = ets.length ? (ets.reduce((a, b) => a + b, 0) / ets.length).toFixed(1) : '—';
+
+      let cellsHtml = '';
+      for (let c = 0; c < CPE; c++) {
+        const globalCell = eIdx * CPE + c + 1;
         const temp = grid[eIdx][c];
-        const [bg, fg] = this._tempToColor(temp, lo, hi);
-        const globalCell = eIdx * CELLS_PER_ELEMENT + c + 1;
-        const sId = this._sensorId(globalCell);
-        cells += `<div class="cell" style="background:${bg};color:${fg}" title="${sId}\n${temp !== null ? temp.toFixed(1) + ' °C' : 'unavailable'}">
-          <span class="cn">${String(globalCell).padStart(2, '0')}</span>
-          <span class="ct">${temp !== null ? temp.toFixed(1) : '—'}</span>
-        </div>`;
+        const { bg, fg, border } = this._tempToColor(temp, lo, hi);
+        cellsHtml += `
+          <div class="cell" style="background:${bg};color:${fg};border-color:${border}"
+               title="cell ${globalCell} · ${temp !== null ? temp.toFixed(1) + ' °C' : 'unavailable'}">
+            <span class="cn">${String(globalCell).padStart(2, '0')}</span>
+            <span class="ct">${temp !== null ? temp.toFixed(1) : '—'}</span>
+          </div>`;
       }
 
-      const isTop = e === ELEMENTS;
       const isBottom = e === 1;
-      const elLabel = isTop ? `E${e} ↑` : isBottom ? `E${e} ↓` : `E${e}`;
-      const elTitle = `Element ${e}${isBottom ? ' (bottom)' : isTop ? ' (top)' : ''}`;
-
-      // Per-element min/max
-      const ets = grid[eIdx].filter(v => v !== null && !isNaN(v));
-      const eInfo = ets.length
-        ? `${Math.min(...ets).toFixed(1)}–${Math.max(...ets).toFixed(1)} °C`
-        : 'no data';
-
-      rows += `<div class="row">
-        <div class="elabel" title="${elTitle}">${elLabel}</div>
-        <div class="cells">${cells}</div>
-        <div class="einfo">${eInfo}</div>
-      </div>`;
+      const isTop = e === ELEMENTS;
+      cols += `
+        <div class="col">
+          <div class="el-header" title="Element ${e}${isBottom ? ' — bottom' : isTop ? ' — top' : ''}">
+            E${e}${isBottom ? ' ↓' : isTop ? ' ↑' : ''}
+          </div>
+          <div class="cells">${cellsHtml}</div>
+          <div class="el-footer">${eAvg}°<br><span class="el-range">${eMin}–${eMax}</span></div>
+        </div>`;
     }
 
-    const gradStops = [
-      'rgb(0,0,220) 0%',
-      'rgb(0,160,160) 25%',
-      'rgb(0,255,0) 50%',
-      'rgb(255,255,0) 75%',
-      'rgb(255,0,0) 100%',
-    ].join(', ');
-
+    // Gradient legend — vertical on the right side
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; }
-        ha-card { padding: 14px 16px 12px; box-sizing: border-box; }
-
-        .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; flex-wrap: wrap; gap: 4px; }
+        ha-card {
+          padding: 14px 14px 12px;
+          box-sizing: border-box;
+        }
+        .header {
+          display: flex; justify-content: space-between; align-items: baseline;
+          margin-bottom: 14px; flex-wrap: wrap; gap: 4px;
+        }
         .title { font-size: 1em; font-weight: 500; color: var(--primary-text-color); }
         .stats { font-size: 0.78em; color: var(--secondary-text-color); text-align: right; }
         .stats b { color: var(--primary-text-color); }
 
-        .grid { display: flex; flex-direction: column; gap: 3px; }
-        .row { display: flex; align-items: center; gap: 4px; }
-
-        .elabel {
-          width: 30px; flex-shrink: 0;
-          font-size: 0.68em; font-weight: 700;
+        .body {
+          display: flex;
+          gap: 6px;
+          align-items: stretch;
+        }
+        .grid {
+          display: flex;
+          gap: 4px;
+          flex: 1;
+        }
+        .col {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .el-header {
+          font-size: 0.65em;
+          font-weight: 700;
           color: var(--secondary-text-color);
-          text-align: right;
+          text-align: center;
+          padding-bottom: 2px;
           cursor: default;
+        }
+        .cells {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          flex: 1;
+        }
+        .cell {
+          flex: 1;
+          min-height: 28px;
+          border-radius: 4px;
+          border: 1px solid transparent;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          cursor: default;
+          transition: filter 0.15s, transform 0.1s;
+        }
+        .cell:hover {
+          filter: brightness(1.2);
+          transform: scaleX(1.06);
+          z-index: 2;
+          position: relative;
+        }
+        .cn {
+          font-size: 0.48em;
+          opacity: 0.65;
+          line-height: 1;
+          letter-spacing: 0.02em;
+        }
+        .ct {
+          font-size: 0.68em;
+          font-weight: 700;
+          line-height: 1.35;
+        }
+        .el-footer {
+          font-size: 0.58em;
+          color: var(--secondary-text-color);
+          text-align: center;
+          padding-top: 3px;
+          line-height: 1.4;
+        }
+        .el-range {
+          opacity: 0.7;
+          font-size: 0.9em;
+        }
+
+        /* Vertical legend */
+        .legend {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+          width: 22px;
+          flex-shrink: 0;
+        }
+        .lval {
+          font-size: 0.65em;
+          color: var(--secondary-text-color);
+          white-space: nowrap;
+          writing-mode: horizontal-tb;
           line-height: 1;
         }
-        .cells { display: flex; flex: 1; gap: 2px; }
-        .cell {
-          flex: 1; min-width: 0;
-          aspect-ratio: 0.8;
-          border-radius: 3px;
-          display: flex; flex-direction: column;
-          align-items: center; justify-content: center;
-          cursor: default;
-          transition: filter 0.15s;
-          overflow: hidden;
+        .lbar {
+          flex: 1;
+          width: 10px;
+          border-radius: 5px;
+          background: linear-gradient(
+            to bottom,
+            hsl(0,90%,38%),
+            hsl(30,90%,40%),
+            hsl(60,90%,43%),
+            hsl(120,85%,43%),
+            hsl(180,80%,44%),
+            hsl(210,80%,46%),
+            hsl(240,80%,48%)
+          );
         }
-        .cell:hover { filter: brightness(1.18); z-index: 1; }
-        .cn { font-size: 0.5em; opacity: 0.7; line-height: 1; }
-        .ct { font-size: 0.66em; font-weight: 700; line-height: 1.3; }
 
-        .einfo {
-          width: 64px; flex-shrink: 0;
+        .orient {
           font-size: 0.62em;
           color: var(--secondary-text-color);
-          text-align: left;
-          padding-left: 2px;
-          line-height: 1.3;
+          text-align: center;
+          margin-top: 8px;
+          letter-spacing: 0.03em;
         }
-
-        .divider {
-          border: none;
-          border-top: 1px solid var(--divider-color, rgba(128,128,128,0.2));
-          margin: 8px 0;
-        }
-        .footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
-        .legend { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 160px; }
-        .lbar {
-          flex: 1; height: 7px; border-radius: 3px;
-          background: linear-gradient(to right, ${gradStops});
-        }
-        .lval { font-size: 0.72em; color: var(--secondary-text-color); white-space: nowrap; }
-        .orient { font-size: 0.68em; color: var(--secondary-text-color); }
-        .warn { font-size: 0.7em; color: var(--warning-color, orange); }
+        .warn { color: var(--warning-color, orange); }
       </style>
       <ha-card>
         <div class="header">
           <div class="title">${title}</div>
           <div class="stats">
-            ${avg !== null ? `avg <b>${avg.toFixed(1)} °C</b> &nbsp;|&nbsp; range <b>${lo}–${hi} °C</b>` : 'no data'}
-            ${missing > 0 ? `<br><span class="warn">${missing} sensor${missing > 1 ? 's' : ''} unavailable</span>` : ''}
+            ${avg !== null ? `avg <b>${avg.toFixed(1)} °C</b> &nbsp;|&nbsp; <b>${lo.toFixed(1)}–${hi.toFixed(1)} °C</b>` : 'no data'}
+            ${missing > 0 ? `<br><span class="warn">${missing} unavailable</span>` : ''}
           </div>
         </div>
-        <div class="grid">${rows}</div>
-        <hr class="divider">
-        <div class="footer">
-          <div class="orient">↑ top element &nbsp;·&nbsp; ↓ bottom element</div>
+        <div class="body">
+          <div class="grid">${cols}</div>
           <div class="legend">
-            <span class="lval">${lo} °C</span>
+            <span class="lval">${hi.toFixed(0)}°</span>
             <div class="lbar"></div>
-            <span class="lval">${hi} °C</span>
+            <span class="lval">${lo.toFixed(0)}°</span>
           </div>
         </div>
+        <div class="orient">← bottom of stack &nbsp;·&nbsp; top of stack →</div>
       </ha-card>
     `;
   }
@@ -201,6 +253,6 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'hvs-heatmap-card',
   name: 'HVS Battery Heatmap',
-  description: 'Temperature heatmap for BYD HVS battery — 4 elements × 12 cells per element',
+  description: 'Temperature heatmap for BYD HVS battery — 4 elements × 12 cells',
   preview: false,
 });
